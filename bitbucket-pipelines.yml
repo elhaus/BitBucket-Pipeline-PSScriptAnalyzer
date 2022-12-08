@@ -1,0 +1,45 @@
+
+image: mcr.microsoft.com/powershell
+
+pipelines:
+  default:
+    - step:
+        name: 'Lint with PSScriptAnalyzer'
+        script:
+          - pwsh -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted;
+              Install-Module PSScriptAnalyzer -ErrorAction Stop"
+          - pwsh -Command "New-Item 'TestResult' -ItemType Directory;"
+          - pwsh -Command "Invoke-ScriptAnalyzer -Path . -Recurse -Outvariable issues;
+              \$i = 1;
+              \$issues | Select-Object @{n='summary';e={\$_.RuleName}},
+                  @{n='details';e={\$_.Message}},
+                  @{n='annotation_type';e={'CODE_SMELL'}},
+                  @{n='severity';e={ if(\$_.Severity -like 'Information') {'LOW'} elseif(\$_.Severity -like 'Warning') {'MEDIUM'} else {'HIGH'} }},
+                  @{n='result';e={ if(\$_.Severity -like 'Information') {'PASSED'} elseif(\$_.Severity -like 'Warning') {'IGNORED'} else {'FAILED'} }},
+                  @{n='path';e={\$_.ScriptPath.Substring((Get-Location).Path.Length + 1)}},
+                  @{n='line';e={\$_.Line}} | ForEach-Object {
+                      \$_ | Add-Member -MemberType NoteProperty -Name 'external_id' -Value \$i;
+                      \$i++;
+                      \$_
+                  } | ConvertTo-Json | Set-Content -Path 'TestResult/result.json';
+              @{
+                title= 'PSScriptAnalyzer report';
+                details= 'This Report shows the result of PSScriptAnalyzer.';
+                report_type= 'SECURITY';
+                logo_url= 'https://raw.githubusercontent.com/PowerShell/PSScriptAnalyzer/master/logo.png';
+                result= \$(if (\$issues.Where({\$_.Severity -eq 'Error'})) { 'FAILED' } else { 'PASSED' } )
+              } | ConvertTo-Json | Set-Content -Path 'TestResult/report.json';"
+          - pwsh -Command "Invoke-WebRequest 
+              -Uri 'http://api.bitbucket.org/2.0/repositories/$BITBUCKET_REPO_OWNER/$BITBUCKET_REPO_SLUG/commit/$BITBUCKET_COMMIT/reports/PSScriptAnalyzer' 
+              -Headers @{ 'Content-Type' = 'application/json' } 
+              -Proxy 'http://localhost:29418' 
+              -Method Put 
+              -Body (Get-Content -Path 'TestResult/report.json')"
+          - pwsh -Command "Invoke-WebRequest 
+              -Uri 'http://api.bitbucket.org/2.0/repositories/$BITBUCKET_REPO_OWNER/$BITBUCKET_REPO_SLUG/commit/$BITBUCKET_COMMIT/reports/PSScriptAnalyzer/annotations' 
+              -Headers @{ 'Content-Type' = 'application/json' } 
+              -Proxy 'http://localhost:29418' 
+              -Method Post 
+              -Body (Get-Content -Path 'TestResult/result.json')"
+          - pwsh -Command "\$data = Get-Content -Path 'TestResult/result.json' | ConvertFrom-Json;
+              if ( \$data | Where {\$_.result -like 'FAILED'} ) { Write-Error 'There were errors.' -ErrorAction Stop};"
